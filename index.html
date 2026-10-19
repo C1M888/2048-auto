@@ -10,6 +10,7 @@
 @keyframes points{0%{transform:translateY(0);opacity:1}100%{transform:translateY(-44px);opacity:0}}
 .motion-off .tile.spawn,.motion-off .tile.merge,.motion-off .tile.merge:after,.motion-off .score-burst{animation:none}.motion-off .score-burst{display:none}.motion-setting{display:flex;align-items:center;justify-content:space-between;margin-bottom:20px;font-size:13px;font-weight:650}select{font:inherit;padding:8px;border-radius:8px;border:1px solid #b6bfb0;color:#334c3e;background:#f6f3eb}.version{font-size:10px;opacity:.8}
 </style></head><body><main><header><div><div class="eyebrow">A LITTLE SPACE TO PLAY</div><h1>2048 <span>AUTO</span></h1></div><div class="scores"><div class="score">得分<strong id="score">0</strong></div><div class="score">本机最高<strong id="best">0</strong></div></div></header><p>合并相同数字，慢慢抵达 2048。<br>自己玩，或让 AI 接着走。</p><div class="toolbar"><button id="auto" aria-pressed="false">▶ 开启自动合成</button><button id="reset">重新开始</button></div><div id="board" tabindex="0" role="group" aria-label="2048 棋盘，使用方向键移动"></div><div id="status" role="status" aria-live="polite"></div><div class="settings"><div class="motion-setting"><label for="motion">移动动画</label><select id="motion"><option value="smooth">流畅滑动</option><option value="slow">慢动作</option><option value="none">关闭动画</option></select></div><label class="speed" for="speed"><span>自动合成速度</span><span><output id="speedValue">5</output> / 10</span></label><input id="speed" type="range" min="1" max="10" value="5"><div class="speed"><span>慢慢思考</span><span>快速合成</span></div></div><nav class="arrows" aria-label="方向控制"><button data-dir="left" aria-label="向左">←</button><button data-dir="up" aria-label="向上">↑</button><button data-dir="down" aria-label="向下">↓</button><button data-dir="right" aria-label="向右">→</button></nav><footer>方向键 / WASD · 手机上滑动棋盘<br>单机独立棋局 · 进度仅保存在你的浏览器<br>其他玩家不会影响你的棋盘 · AI 不保证每局获胜<br><span class="version">滑动动画版 3</span></footer></main>
+<script src="ai.js"></script>
 <script>
 'use strict';
 const $=id=>document.getElementById(id),dirs=['left','up','right','down'];
@@ -30,11 +31,32 @@ board=next.board;score+=next.gain;best=Math.max(best,score);won=won||board.some(
 if(next.gain){const burst=document.createElement('span');burst.className='score-burst';burst.textContent='+'+next.gain;$('score').parentElement.append(burst);setTimeout(()=>burst.remove(),750);}
 await new Promise(resolve=>setTimeout(resolve,reduced?0:300));if(version!==generation)return false;busy=false;if(queued){const d=queued;queued=null;void move(d);}return true;}
 new ResizeObserver(()=>{if(!busy)document.querySelectorAll('.tile').forEach(el=>positionTile(el,+el.dataset.index));}).observe($('board'));
-function quality(b){let empty=0,smooth=0,mono=0;const log=b.map(v=>v?Math.log2(v):0);for(let r=0;r<4;r++){let rowUp=0,rowDown=0,colUp=0,colDown=0;for(let c=0;c<4;c++){let i=r*4+c;if(!b[i])empty++;if(c<3){const a=log[i],z=log[i+1];rowUp+=Math.max(0,z-a);rowDown+=Math.max(0,a-z);if(a&&z)smooth-=Math.abs(a-z);const x=log[c*4+r],y=log[(c+1)*4+r];colUp+=Math.max(0,y-x);colDown+=Math.max(0,x-y);if(x&&y)smooth-=Math.abs(x-y);}}mono-=Math.min(rowUp,rowDown)+Math.min(colUp,colDown);}const max=Math.max(...log),corner=Math.max(log[0],log[3],log[12],log[15]);return empty*270+mono*35+smooth*8+max*25+(corner===max?150:0);}
-function search(b,depth,chance){if(depth===0)return quality(b);if(chance){const empty=b.map((v,i)=>v?-1:i).filter(i=>i>=0);if(!empty.length)return search(b,depth-1,false);let sum=0;for(const i of empty){const next=b.slice();next[i]=2;sum+=.9*search(next,depth-1,false);next[i]=4;sum+=.1*search(next,depth-1,false);}return sum/empty.length;}let value=-1e8;for(const d of dirs){const n=slide(b,d);if(n.changed)value=Math.max(value,search(n.board,depth-1,true)+n.gain*.1);}return value;}
-function choose(b){let answer=null,value=-Infinity;for(const d of dirs){const n=slide(b,d);if(n.changed){const v=search(n.board,3,true)+n.gain*.1;if(v>value){value=v;answer=d;}}}return answer;}
-function stop(){autoEpoch++;running=false;clearTimeout(timer);timer=null;$('auto').textContent='▶ 开启自动合成';$('auto').setAttribute('aria-pressed','false');}
-async function tick(epoch){if(!running||epoch!==autoEpoch)return;if(busy){timer=setTimeout(()=>tick(epoch),40);return;}const dir=choose(board);if(dir===null){stop();updateStatus();return;}await move(dir);if(running&&epoch===autoEpoch)timer=setTimeout(()=>tick(epoch),Math.max(30,900-Number($('speed').value)*85));}
+// Search off the UI thread; a short fallback also supports file:// and blocked workers.
+const fallbackAI=createAI();
+let aiWorker=null,pendingAI=null,requestId=0;
+function cancelAI(){
+  if(pendingAI){clearTimeout(pendingAI.watchdog);pendingAI.resolve(null);pendingAI=null;
+    if(aiWorker){aiWorker.terminate();aiWorker=null;}}
+}
+function choose(b){
+  return new Promise(resolve=>{
+    const id=++requestId;
+    const fallback=()=>{if(!pendingAI||pendingAI.id!==id)return;
+      if(aiWorker)aiWorker.terminate();aiWorker=null;
+      clearTimeout(pendingAI.watchdog);pendingAI=null;resolve(fallbackAI.choose(b,8));};
+    pendingAI={id,resolve,watchdog:setTimeout(fallback,1500)};
+    try{
+      if(!aiWorker){aiWorker=new Worker('ai.js');
+        aiWorker.onmessage=({data})=>{if(!pendingAI||data.id!==pendingAI.id)return;
+          const request=pendingAI;clearTimeout(request.watchdog);pendingAI=null;request.resolve(data.dir);};
+      }
+      aiWorker.onerror=event=>{event.preventDefault();fallback();};
+      aiWorker.postMessage({id,board:b,budget:90});
+    }catch{fallback();}
+  });
+}
+function stop(){autoEpoch++;cancelAI();running=false;clearTimeout(timer);timer=null;$('auto').textContent='▶ 开启自动合成';$('auto').setAttribute('aria-pressed','false');}
+async function tick(epoch){if(!running||epoch!==autoEpoch)return;if(busy){timer=setTimeout(()=>tick(epoch),40);return;}const dir=await choose(board.slice());if(!running||epoch!==autoEpoch)return;if(dir===null){stop();updateStatus();return;}await move(dir);if(running&&epoch===autoEpoch)timer=setTimeout(()=>tick(epoch),Math.max(30,900-Number($('speed').value)*85));}
 $('auto').onclick=()=>{if(running)stop();else if(!over(board)){queued=null;running=true;const epoch=++autoEpoch;$('auto').textContent='Ⅱ 暂停自动合成';$('auto').setAttribute('aria-pressed','true');timer=setTimeout(()=>tick(epoch),0);}updateStatus();};
 function reset(){stop();generation++;queued=null;busy=false;board=Array(16).fill(0);score=0;won=false;const a=spawn(),b=spawn();render([],[a,b]);}
 $('reset').onclick=()=>{if(score>0&&!confirm('要重新开始吗？当前这局的进度将被替换。'))return;reset();};
