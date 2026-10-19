@@ -24,12 +24,14 @@ function positionTile(el,i){const slot=$('board').children[i];el.style.left=slot
 function render(merged=[],fresh=[]){const grid=$('board');grid.replaceChildren(...Array.from({length:16},()=>{const e=document.createElement('div');e.className='slot';e.setAttribute('aria-hidden','true');return e;}));board.forEach((v,i)=>{if(!v)return;const el=document.createElement('div');el.className='tile'+(v>2048?' large':'')+(merged.includes(i)?' merge':fresh.includes(i)?' spawn':'');el.dataset.v=v;el.dataset.index=i;el.textContent=v;el.setAttribute('aria-label',String(v));positionTile(el,i);grid.append(el);});$('score').textContent=score;$('best').textContent=best;updateStatus();save();}
 // Keep both source tiles until they reach the shared destination.
 function motionPlan(b,dir){const moves=[],merged=[];for(let r=0;r<4;r++){const ids=Array.from({length:4},(_,c)=>dir==='left'?r*4+c:dir==='right'?r*4+3-c:dir==='up'?c*4+r:(3-c)*4+r);const occupied=ids.filter(i=>b[i]);let target=0;for(let j=0;j<occupied.length;j++){const to=ids[target++];moves.push({from:occupied[j],to});if(j+1<occupied.length&&b[occupied[j]]===b[occupied[j+1]]){moves.push({from:occupied[++j],to});merged.push(to);}}}return {moves,merged};}
-async function move(dir){if(busy){queued=dir;return false;}const next=slide(board,dir);if(!next.changed)return false;busy=true;const version=generation;const plan=motionPlan(board,dir),grid=$('board');const reduced=$('motion').value==='none';const duration=reduced?0:$('motion').value==='slow'?520:320;const animations=[];
+// Speed 5 matches the former speed 10; higher settings shorten motion and pauses together.
+function autoTiming(speed){return {scale:Math.min(1,5/speed),delay:speed<=5?900-170*speed:250/speed};}
+async function move(dir){if(busy){queued=dir;return false;}const next=slide(board,dir);if(!next.changed)return false;busy=true;const version=generation;const plan=motionPlan(board,dir),grid=$('board');const reduced=$('motion').value==='none';const pace=running?autoTiming(Number($('speed').value)).scale:1;const duration=reduced?0:($('motion').value==='slow'?520:320)*pace;const animations=[];
 for(const {from,to} of plan.moves){const el=grid.querySelector('[data-index="'+from+'"]');el.classList.remove('spawn','merge');if(from===to)continue;const a=grid.children[from],b=grid.children[to];const animation=el.animate([{transform:'translate(0,0)'},{transform:'translate('+(b.offsetLeft-a.offsetLeft)+'px,'+(b.offsetTop-a.offsetTop)+'px)'}],{duration,easing:'cubic-bezier(.35,0,.25,1)',fill:'forwards'});animations.push(animation.finished.catch(()=>{}));}
 // Commit immediately so refreshing during an animation never loses a move.
 board=next.board;score+=next.gain;best=Math.max(best,score);won=won||board.some(v=>v>=2048);const fresh=spawn();save();await Promise.all(animations);if(version!==generation)return false;render(plan.merged,[fresh]);
 if(next.gain){const burst=document.createElement('span');burst.className='score-burst';burst.textContent='+'+next.gain;$('score').parentElement.append(burst);setTimeout(()=>burst.remove(),750);}
-await new Promise(resolve=>setTimeout(resolve,reduced?0:300));if(version!==generation)return false;busy=false;if(queued){const d=queued;queued=null;void move(d);}return true;}
+await new Promise(resolve=>setTimeout(resolve,reduced?0:300*pace));if(version!==generation)return false;busy=false;if(queued){const d=queued;queued=null;void move(d);}return true;}
 new ResizeObserver(()=>{if(!busy)document.querySelectorAll('.tile').forEach(el=>positionTile(el,+el.dataset.index));}).observe($('board'));
 // Search off the UI thread; a short fallback also supports file:// and blocked workers.
 const fallbackAI=createAI();
@@ -56,7 +58,7 @@ function choose(b){
   });
 }
 function stop(){autoEpoch++;cancelAI();running=false;clearTimeout(timer);timer=null;$('auto').textContent='▶ 开启自动合成';$('auto').setAttribute('aria-pressed','false');}
-async function tick(epoch){if(!running||epoch!==autoEpoch)return;if(busy){timer=setTimeout(()=>tick(epoch),40);return;}const dir=await choose(board.slice());if(!running||epoch!==autoEpoch)return;if(dir===null){stop();updateStatus();return;}await move(dir);if(running&&epoch===autoEpoch)timer=setTimeout(()=>tick(epoch),Math.max(30,900-Number($('speed').value)*85));}
+async function tick(epoch){if(!running||epoch!==autoEpoch)return;if(busy){timer=setTimeout(()=>tick(epoch),40);return;}const dir=await choose(board.slice());if(!running||epoch!==autoEpoch)return;if(dir===null){stop();updateStatus();return;}await move(dir);if(running&&epoch===autoEpoch)timer=setTimeout(()=>tick(epoch),autoTiming(Number($('speed').value)).delay);}
 $('auto').onclick=()=>{if(running)stop();else if(!over(board)){queued=null;running=true;const epoch=++autoEpoch;$('auto').textContent='Ⅱ 暂停自动合成';$('auto').setAttribute('aria-pressed','true');timer=setTimeout(()=>tick(epoch),0);}updateStatus();};
 function reset(){stop();generation++;queued=null;busy=false;board=Array(16).fill(0);score=0;won=false;const a=spawn(),b=spawn();render([],[a,b]);}
 $('reset').onclick=()=>{if(score>0&&!confirm('要重新开始吗？当前这局的进度将被替换。'))return;reset();};
